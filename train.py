@@ -10,7 +10,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from model import GuideVAE, PredictVAE
+from model import GuideVAE
 from utils import Dataset,TESTDataset
 import pdb
 
@@ -72,7 +72,6 @@ def train(args):
 
 #finish
     model_guide = GuideVAE(args.feature_size, args.class_size, args.latent_size).to(device)
-    model_predict =  PredictVAE(args.feature_size, args.latent_size).to(device)
     optimizer_guide = torch.optim.AdamW(
                         model_guide.parameters(),
                         lr=lr,
@@ -81,16 +80,7 @@ def train(args):
     scheduler_guide = torch.optim.lr_scheduler.LambdaLR(
                             optimizer_guide,
                             lambda steps: min((steps+1)/warmup_steps, 1)
-                        )
-    optimizer_predict = torch.optim.AdamW(
-                        model_predict.parameters(),
-                        lr=lr,
-                        weight_decay=wt_decay
                     )
-    scheduler_predict = torch.optim.lr_scheduler.LambdaLR(
-                            optimizer_predict,
-                            lambda steps: min((steps+1)/warmup_steps, 1)
-                        )
     total_updates = 0
 
 
@@ -116,22 +106,14 @@ def train(args):
                 # rewards_target = torch.clone(rewards).detach().to(device)
 
                 recon_mu, recon_std, z1_mu, z1_log_std = model_guide.forward(feature, feature_class)
-                GODA_loss1 = model_guide.loss_function(recon_mu, recon_std, feature_class, z1_mu, z1_log_std)
-
-                z2_mu, z2_log_std = model_predict.forward(feature)
-                GODA_loss2 = model_predict.loss_function(z1_mu, z1_log_std, z2_mu, z2_log_std)
-                
-                GODA_loss = torch.mean(GODA_loss1+GODA_loss2)
+                z2_mu, z2_log_std = model_guide.reconstruct(feature)
+                GODA_loss = model_guide.loss_function(recon_mu, recon_std, feature_class, z1_mu, z1_log_std, z2_mu, z2_log_std)
 
                 optimizer_guide.zero_grad()
-                optimizer_predict.zero_grad()
                 GODA_loss.backward()
                 torch.nn.utils.clip_grad_norm_(model_guide.parameters(), 0.25)
-                torch.nn.utils.clip_grad_norm_(model_predict.parameters(), 0.25)
                 optimizer_guide.step()
                 scheduler_guide.step()
-                optimizer_predict.step()
-                scheduler_predict.step()
 
                 log_GODA_losses.append(GODA_loss.detach().cpu().item())
         mean_GODA_loss = np.mean(log_GODA_losses)
