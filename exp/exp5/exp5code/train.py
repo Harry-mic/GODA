@@ -4,6 +4,9 @@ import sys
 import random
 import csv
 from datetime import datetime
+from utils import Dataset,TESTDataset
+from model import GuideVAE,Starloss
+import pdb
 
 import numpy as np
 import gym
@@ -16,7 +19,22 @@ from decision_transformer.utils import D4RLTrajectoryDataset, evaluate_on_env, g
 from decision_transformer.model import DecisionTransformer
 
 import sys
+
 sys.path.append("..")
+
+def goback(rtg, r, r_, r_mean, r_std, rtg_scale):
+    r = r*r_std+r_mean
+    r_ = r_*r_std+r_mean
+    rtg = rtg*rtg_scale
+    rtg_ = np.zeros_like(rtg)
+    rtg = rtg.to(torch.device('cuda:0'))
+    rtg_ = torch.from_numpy(rtg_).to(torch.device('cuda:0'))
+    for i in range(20, 10, -1):
+        temp = torch.zeros(64).to(torch.device('cuda:0'))
+        for j in range(i - 11, 10):
+            temp += r_[:,j] - r[:,j]
+        rtg_[:,i-1] = rtg[:,i-1] + temp
+    return rtg_[:,10:20]/rtg_scale
 
 def train(args):
     seed=args.seed
@@ -67,6 +85,7 @@ def train(args):
     embed_dim = args.embed_dim          # embedding (hidden) dim of transformer
     n_heads = args.n_heads              # num of transformer heads
     dropout_p = args.dropout_p          # dropout probability
+    star_batch_size = args.star_batch_size 
 
     # load data from this file
     dataset_path = f'{args.dataset_dir}/{env_d4rl_name}.pkl'
@@ -80,7 +99,7 @@ def train(args):
     device = torch.device(args.device)
     traj_dataset = Dataset(dataset_path, args.context_len,False)
     traj_test_dataset = TESTDataset(dataset_path, args.context_len,False)
-    traj_star_dataset = StarDataset(dataset_path, args.context_len,False)
+    traj_star_dataset = D4RLTrajectoryDataset(dataset_path, context_len, rtg_scale)
     traj_data_loader = DataLoader(
                             traj_dataset,
                             batch_size=batch_size,
@@ -97,8 +116,8 @@ def train(args):
                         )
     traj_star_loader = DataLoader(
                             traj_star_dataset,
-                            batch_size=star_batch_size,
-                            shuffle=False,
+                            batch_size=batch_size,
+                            shuffle=True,
                             pin_memory=True,
                             drop_last=True
                         )
@@ -106,6 +125,8 @@ def train(args):
     data_iter = iter(traj_data_loader)
     data_test_iter = iter(traj_data_test_loader)
     star_iter = iter(traj_star_loader)
+
+    state_mean, state_std, reward_mean, reward_std, action_mean, action_std = traj_star_dataset.get_state_stats()
 
     start_time = datetime.now().replace(microsecond=0)
     start_time_str = start_time.strftime("%y-%m-%d-%H-%M-%S")
@@ -190,12 +211,17 @@ def train(args):
                     data_iter = iter(traj_data_loader)
                     states, actions, rewards = next(data_iter)
 
-                states = states.reshape(64,-1).to(device)          # B x T x state_dim     [64,170]
-                actions = actions.reshape(64,-1).to(device)        # B x T x act_dim       [64,60]
-                rewards = rewards.reshape(64,-1).to(device)        #                       [64,10]       
+                states = states.reshape(64,-1).to(device)          # B x T x state_dim     [64,340]
+                actions = actions.reshape(64,-1).to(device)        # B x T x act_dim       [64,120]
+                rewards = rewards.reshape(64,-1).to(device)        #                       [64,20]       
+                
                 #此处需要将三个变量合并起来
-                feature = torch.cat([states[:,0:85],actions[:,0:30],rewards[:,0:5]],dim=1) #s1a1r1~s5a5r5
-                feature_class = torch.cat([states[:,85:170],actions[:,30:60],rewards[:,5:10]],dim=1) #s6a6r6~s10a10r10
+                feature = torch.cat([states[:,0:int(state_dim*(context_len/2))],
+                                     actions[:,0:int(act_dim*(context_len/2))],
+                                     rewards[:,0:int((context_len/2))]],dim=1) #s1a1r1~s5a5r5     #[64,240]
+                feature_class = torch.cat([states[:,int(state_dim*(context_len/2)):state_dim*context_len],
+                                           actions[:,int(act_dim*(context_len/2)):act_dim*context_len],
+                                           rewards[:,int((context_len/2)):context_len]],dim=1) #s6a6r6~s10a10r10      [64,240]                                     #
 
                 recon_mu, recon_std, z1_mu, z1_log_std = model_guide.forward(feature, feature_class)
                 z2_mu, z2_log_std, recon_mu2, recon_log_std2 = model_guide.reconstruct(feature)
@@ -218,35 +244,38 @@ def train(args):
         print(log_str)
 
 
-        #Test the training result
-        final_GODA_loss=[]
-        for _ in range(num_updates_per_iter):
-            try:
-                states, actions, rewards = next(data_test_iter)
-            except StopIteration:
-                data_test_iter = iter(traj_data_test_loader)
-                states, actions, rewards = next(data_test_iter)
+#Test the training result
+    final_GODA_loss=[]
+    for _ in range(num_updates_per_iter):
+        try:
+            states, actions, rewards = next(data_test_iter)
+        except StopIteration:
+            data_test_iter = iter(traj_data_test_loader)
+            states, actions, rewards = next(data_test_iter)
 
-            states = states.reshape(64,-1).to(device)          # B x T x state_dim     [64,170]
-            actions = actions.reshape(64,-1).to(device)        # B x T x act_dim       [64,60]
-            rewards = rewards.reshape(64,-1).to(device)  
+        states = states.reshape(64,-1).to(device)          # B x T x state_dim     [64,170]
+        actions = actions.reshape(64,-1).to(device)        # B x T x act_dim       [64,60]
+        rewards = rewards.reshape(64,-1).to(device)  
 
-            feature = torch.cat([states[:,0:85],actions[:,0:30],rewards[:,0:5]],dim=1) #s1a1r1~s5a5r5
-            feature_class = torch.cat([states[:,85:170],actions[:,30:60],rewards[:,5:10]],dim=1) #s6a6r6~s10a10r10
+        feature = torch.cat([states[:,0:int(state_dim*(context_len/2))],
+                                    actions[:,0:int(act_dim*(context_len/2))],
+                                    rewards[:,0:int((context_len/2))]],dim=1) #s1a1r1~s5a5r5     
+                                                                        #
+        feature_class = torch.cat([states[:,int(state_dim*(context_len/2)):state_dim*context_len],
+                                    actions[:,int(act_dim*(context_len/2)):act_dim*context_len],
+                                    rewards[:,int((context_len/2)):context_len]],dim=1) #s6a6r6~s10a10r10                                                 #
+            
+        recon_mu, recon_std, z1_mu, z1_log_std = model_guide.forward(feature, feature_class)
+        z2_mu, z2_log_std, recon_mu2, recon_log_std2 = model_guide.reconstruct(feature)
+        GODA_loss = model_guide.loss_function(recon_mu, recon_std, feature_class, z1_mu, z1_log_std, z2_mu, z2_log_std)
 
-            recon_mu, recon_std, z1_mu, z1_log_std = model_guide.forward(feature, feature_class)
-            z2_mu, z2_log_std, recon_mu2, recon_log_std2 = model_guide.reconstruct(feature)
-            GODA_loss = model_guide.loss_function(recon_mu, recon_std, feature_class, z1_mu, z1_log_std, z2_mu, z2_log_std)
-
-            final_GODA_loss.append(GODA_loss.detach().cpu().item())
-        mean_GODA_final_loss = np.mean(final_GODA_loss)
-        log_str = (
-                "GODA test loss: " +  format(mean_GODA_final_loss, ".5f") + '\n'
-            )
-        print(log_str)
+        final_GODA_loss.append(GODA_loss.detach().cpu().item())
+    mean_GODA_final_loss = np.mean(final_GODA_loss)
+    log_str = (
+            "GODA test loss: " +  format(mean_GODA_final_loss, ".5f") + '\n'
+        )
+    print(log_str)
 #******************************************************************************************数据增强的部分************************************************************************
-
-
 
     for i_train_iter in range(max_train_iters):
 
@@ -255,46 +284,70 @@ def train(args):
 
         for _ in range(num_updates_per_iter):
             try:
-                timesteps, states, actions, returns_to_go, traj_mask = next(data_iter)
+                timesteps, states, actions, returns_to_go, traj_mask, rewards = next(star_iter)
             except StopIteration:
-                data_iter = iter(traj_data_loader)
-                timesteps, states, actions, returns_to_go, traj_mask = next(data_iter)
+                star_iter = iter(traj_star_loader)
+                timesteps, states, actions, returns_to_go, traj_mask, rewards = next(star_iter)
 
-            #将采样出的数据输入增强网络*******************************************************************************************************************************
-            states = states.reshape(star_batch_size ,-1).to(device)          # B x T x state_dim     [64,170]                                                      # 
-            actions = actions.reshape(star_batch_size ,-1).to(device)        # B x T x act_dim       [64,60]                                                       #
-            rewards = rewards.reshape(star_batch_size ,-1).to(device)        #                       [64,10]                                                       #
-                                                                                                                                                                   
-            feature = torch.cat([states[:,0:85],actions[:,0:30],rewards[:,0:5]],dim=1) #s1a1r1~s5a5r5                                                              #
-            feature_class = torch.cat([states[:,85:170],actions[:,30:60],rewards[:,5:10]],dim=1) #s6a6r6~s10a10r10                                                 #
-                                                                                                                                                                   
-            z1_mu, z1_log_std = model_guide.encode(feature, feature_class, True)                                                                                   #
-            z2_mu, z2_log_std = model_guide.encode(feature, 0, False)                                                                                              #
-            z2_log_std = torch.clamp(z2_log_std, -20, 2)                                                                                                           #
-            z2_std = torch.exp(z2_log_std)                                                                                                                         #
- 
-            recon_mu_ori,recon_log_std_ori = model_guide.decode(z1_mu,feature)                                                                                     #
-            z = z1_mu.clone().detach()                                                                                                                             #
-            z.requires_grad = True                                                                                                                                 #
-            scene_optim = torch.optim.Adam([z], lr=lr)                                                                                                             #
-            loss_star_function = Starlosses()                                                                                                                      #
-            loss =[]                                                                                                                                               #
+            #将采样出的数据输入增强网络********************************************************************************************************************************
+            states = states.reshape(star_batch_size ,-1).to(device)          # B x T x state_dim     [64,170]                                                       # 
+            actions = actions.reshape(star_batch_size ,-1).to(device)        # B x T x act_dim       [64,60]                                                        #
+            rewards = rewards.reshape(star_batch_size ,-1).to(device)        #                       [64,10]                                                        #
+                                                                                                                                                                    
+            feature = torch.cat([states[:,0:int(state_dim*(context_len/2))],  
+                                    actions[:,0:int(act_dim*(context_len/2))],                                                                                      #
+                                        rewards[:,0:int((context_len/2))]],dim=1) #s1a1r1~s5a5r5                                                                       #    
+
+            feature_class = torch.cat([states[:,int(state_dim*(context_len/2)):state_dim*context_len],                                                              #
+                                        actions[:,int(act_dim*(context_len/2)):act_dim*context_len],                                                                #
+                                        rewards[:,int((context_len/2)):context_len]],dim=1) #s6a6r6~s10a10r10                                                       #
+                                                                                                                                                                    
+            z1_mu, z1_log_std = model_guide.encode(feature, feature_class, True)                                                                                    #
+            z2_mu, z2_log_std = model_guide.encode(feature, 0, False)                                                                                               #
+            z2_log_std = torch.clamp(z2_log_std, -20, 2)                                                                                                            #
+            z2_std = torch.exp(z2_log_std)                                                                                                                          #
+
+            # recon_mu_ori,recon_log_std_ori = model_guide.decode(z1_mu,feature)                                                                                    #
+            z = z1_mu.clone().detach()                                                                                                                              #
+            z.requires_grad = True                                                                                                                                  #
+            scene_optim = torch.optim.Adam([z], lr=lr)                                                                                                              #
+            loss_star_function = Starloss()                                                                                                                         #
+            loss =[]                                                                                                                                                #
             
-            #找到这64条序列对应的最好的z                                                                                                                                              
-            for i in range(200):                                                                                                                                   #
-                recon_mu,recon_log_std = model_guide.decode(z,feature)                                                                                             #
-                rewards = torch.mean(recon_mu[:,115:])#rewards: s6'~s10'                                                                                           #
-                loss_star = loss_star_function.forward(rewards, z, z1_mu, z2_mu, z2_std)                                                                           #
-                loss.append(loss_star.detach().cpu().item())                                                                                                       #
-                scene_optim.zero_grad()                                                                                                                                              
-                loss_star.backward(retain_graph=True)                                                                                                              #
-                scene_optim.step()                                                                                                                                 #
+            #找到这64条序列对应的最好的z                                                                                                                              #                
+            for i in range(200):                                                                                                                                    #
+                recon_mu,recon_log_std = model_guide.decode(z,feature)                                                                                              #
+                rewards_ = torch.mean(recon_mu[:,(state_dim+act_dim)*int(context_len/2):])#rewards: s6'~s10'                                                        #
+                loss_star = loss_star_function.forward(rewards_, z, z1_mu, z2_mu, z2_std)                                                                           #
+                loss.append(loss_star.detach().cpu().item())                                                                                                        #
+                scene_optim.zero_grad()                                                                                                                             #                 
+                loss_star.backward(retain_graph=True)                                                                                                               #
+                scene_optim.step()                                                                                                                                  #
             
-            #替换数据
-            timesteps = timesteps.to(device)    # B x T                                                                                                            #
-            states = recon_mu[:,:states_dim*squence_length].reshape(star_batch_size, squence_length, states_dim).to(device)                                        #
-            actions = recon_mu[:,states_dim*squence_length:(states_dim+actions_dim)*squence_length].reshape(star_batch_size ,squence_length, actions_dim).to(device)# 
-            rewards = recon_mu[:,(states_dim+actions_dim)*squence_length:].reshape(star_batch_size , squence_length, rewards_dim).to(device)                        #
+        #替换数据                                                                                                                                                    #
+            #恢复s6'a6'r6'~s10'a10'r10'                                                                                                                             #
+            timesteps = timesteps.to(device)    # B x T                                                                                                             #
+            states_ = recon_mu[:,0:int(state_dim*(context_len/2))]                                                                                               #
+            actions_ = recon_mu[:,state_dim*int(context_len/2):(state_dim+act_dim)*int(context_len/2)].cpu().detach().numpy()
+            actions_ =  (actions_.reshape(64,10,6)*action_std+action_mean).reshape(64,-1)
+            rewards_ = recon_mu[:,(state_dim+act_dim)*int(context_len/2):]
+            returns_to_go_ = goback(    #[64,10]
+                returns_to_go,   #[64,20]
+                rewards[:,int((context_len/2)):context_len],   #[64,10]
+                rewards_,   #[64,10]
+                reward_mean, 
+                reward_std,
+                rtg_scale).to(device)  
+            
+            #拼凑1~5+6'~10'
+            states = torch.cat([states[:,0:int(state_dim*(context_len/2))],
+                                states_]).reshape(star_batch_size, context_len, state_dim).reshape(64,20,17).to(device)
+            actions = torch.cat([actions[:,0:int(act_dim*(context_len/2))],
+                                    torch.from_numpy(actions_).to(device)]).reshape(star_batch_size, context_len, act_dim).reshape(64,20,6).to(device) 
+            
+            returns_to_go = torch.cat([returns_to_go[:,0:int((context_len/2))].to(device),
+                                        returns_to_go_]).reshape(star_batch_size , context_len, 1).to(device)  
+                        
             traj_mask = traj_mask.to(device)    # B x T                                                                                                             #
             action_target = torch.clone(actions).detach().to(device)                                                                                                #
             #********************************************************************************************************************************************************
@@ -363,7 +416,7 @@ def train(args):
     print("=" * 60)
     print("finished training!")
     print("=" * 60)
-    end_time = datetime.now().replace(microsecond=0)
+    end_time = datetime.now().replace(microsecond=0) 
     time_elapsed = str(end_time - start_time)
     end_time_str = end_time.strftime("%y-%m-%d-%H-%M-%S")
     print("started training at: " + start_time_str)
@@ -405,6 +458,21 @@ if __name__ == "__main__":
     parser.add_argument('--num_updates_per_iter', type=int, default=100)
 
     parser.add_argument('--device', type=str, default='cuda')
+
+    parser.add_argument('--seed',type=int, default=0)
+    parser.add_argument('--log_fn',type=str,default='default')
+    parser.add_argument('--eval', action='store_true')
+    parser.add_argument('--load_model_path', type=str,default='')
+    parser.add_argument('--squences_length', type=int, default=10)
+    parser.add_argument('--recovery_length', type=int, default=5)
+    parser.add_argument('--total_episodes', type=int, default=2186)
+    parser.add_argument('--star_batch_size', type=int, default=64)
+    # parser.add_argument('--log_fn',type=str,default='default')
+    parser.add_argument('--feature_size', type=int, default=240)
+    parser.add_argument('--class_size', type=int, default=240)
+    parser.add_argument('--latent_size', type=int, default=64)
+    parser.add_argument('--batch_nums', type=int, default=1000)
+    parser.add_argument('--traj_length', type=int, default=1000)
 
     args = parser.parse_args()
 

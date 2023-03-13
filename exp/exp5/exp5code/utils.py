@@ -5,8 +5,17 @@ import numpy as np
 from torch.utils.data import Dataset
 import pdb
 
+def discount_cumsum(x, gamma):
+    disc_cumsum = np.zeros_like(x)
+    disc_cumsum[-1] = x[-1]
+    for t in reversed(range(x.shape[0]-1)):
+        disc_cumsum[t] = x[t] + gamma * disc_cumsum[t+1]
+    return disc_cumsum
+
 class Dataset(Dataset):
     def __init__(self, dataset_path, context_len,online_training):
+        
+        rtg_scale = 10
 
         self.online_buffer_size=5000
         self.context_len = context_len
@@ -19,8 +28,11 @@ class Dataset(Dataset):
         for path in self.trajectories:
             self.states.append(path['observations'])
             self.actions.append(path['actions'])
-            self.rewards.append(path['rewards'])
             self.traj_lens.append(len(path['observations']))
+            self.rewards.append(path['rewards'])
+            # path['returns_to_go'] = discount_cumsum(path['rewards'], 1.0) / rtg_scale
+            # self.returns_to_go.append(path['returns_to_go'])
+
 #normalization 
         self.states = np.concatenate(self.states, axis=0)
         self.actions = np.concatenate(self.actions, axis=0)
@@ -60,7 +72,6 @@ class Dataset(Dataset):
             states = torch.from_numpy(traj['observations'][si : si + self.context_len])
             actions = torch.from_numpy(traj['actions'][si : si + self.context_len])
             rewards = torch.from_numpy(traj['rewards'][si : si + self.context_len])
-            # timesteps = torch.arange(start=si, end=si+self.context_len, step=1)
 
             # all ones since no padding
 
@@ -71,6 +82,8 @@ class Dataset(Dataset):
 
 class TESTDataset(Dataset):
     def __init__(self, dataset_path, context_len,online_training):
+
+        rtg_scale = 10
 
         self.online_buffer_size=5000
         self.context_len = context_len
@@ -85,6 +98,9 @@ class TESTDataset(Dataset):
             self.actionss.append(path['actions'])
             self.rewardss.append(path['rewards'])
             self.traj_lenss.append(len(path['observations']))
+            # path['returns_to_go'] = discount_cumsum(path['rewards'], 1.0) / rtg_scale
+            # self.returnss_to_go.append(path['returns_to_go'])
+
 #normalization 
         self.statess = np.concatenate(self.statess, axis=0)
         self.actionss = np.concatenate(self.actionss, axis=0)
@@ -108,6 +124,7 @@ class TESTDataset(Dataset):
         print(f'Max return: {np.max(self.rewardss):.2f}, min: {np.min(self.rewardss):.2f}')
         print('=' * 50)
 
+
     def __len__(self):
         return len(self.trajectoriess)
 
@@ -128,9 +145,7 @@ class TESTDataset(Dataset):
 
         return  states.to(torch.float32), actions.to(torch.float32), rewards.to(torch.float32)
     
-
-
-class StarrDataset(Dataset):
+class StarDataset(Dataset):
     def __init__(self, dataset_path, context_len,online_training):
 
         self.online_buffer_size=5000
