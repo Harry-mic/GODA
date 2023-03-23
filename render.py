@@ -14,7 +14,7 @@ model = load_model_from_path(halfcheetah_xml)
 sim = MjSim(model)
 # 获取 HalfCheetah 状态
 state = sim.get_state()
-test_states = np.array(pd.read_csv("C:/1902why\software\code/research\GODA\GODA_MLP\data\states\exact_s6~s10.csv"))
+test_states = np.array(pd.read_csv("C:/1902why\software\code/research\GODA\GODA_MLP\data\states/3.22.18.48'.csv"))
 viewer = MjViewer(sim)
 viewer.cam.distance = 3
 viewer.cam.elevation = -20
@@ -30,4 +30,4 @@ for i in range(len(test_states)):
     image = sim.render(height=600, width=600, camera_name='track', depth=False)
     image = image[...,::-1]
     image = cv2.flip(image, 0)
-    cv2.imwrite("C:/1902why\software\code/research\GODA\GODA_MLP\data\pic/image_{}.png".format(i), image)
+    cv2.imwrite("C:/1902why\software\code/research\GODA\GODA_MLP\data\pic/3.22.18.48'{}.png".format(i), image)
